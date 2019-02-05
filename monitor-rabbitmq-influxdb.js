@@ -24,20 +24,27 @@ const Influx = require('influxdb-nodejs');
 
 const client = new Influx(INFLUX_DB);
 
+var express = require('express');
+var prometheus = require('prom-client');
+
+var prometheusMetrics = {};
+
+prometheus.collectDefaultMetrics();
+
 const fieldSchema = {
     QueueLength: 'i',
     consumerCount: 'i',
     queue: 's',
-  };
+};
 
-  const tagSchema = {
+const tagSchema = {
 
-  };
-  
-  client.schema('hyperflow_rabbitmq_monitor', fieldSchema, tagSchema, {
+};
+
+client.schema('hyperflow_rabbitmq_monitor', fieldSchema, tagSchema, {
     // default is false
     stripUnknown: true,
-  });
+});
 
 console.log(AMQP_URL);
 
@@ -45,82 +52,106 @@ var tryAgain = true;
 
 function notifyCloudWatchMetric(value)
 {
-  console.log("value %d",value);
-  var params = {
-    MetricData: [ 
-      {
-        MetricName: HYPERFLOW_METRIC_NAME, 
-        Value: value,
-        Dimensions: [
-          {
-            Name: 'ClusterName', 
-            Value: CLUSET_NAME
-          }]
-      }
-    ],
-    Namespace: HYPERFLOW_METRIC_NAMESPACE 
-    
-  };
+    console.log("value %d",value);
+    var params = {
+        MetricData: [
+            {
+                MetricName: HYPERFLOW_METRIC_NAME,
+                Value: value,
+                Dimensions: [
+                    {
+                        Name: 'ClusterName',
+                        Value: CLUSET_NAME
+                    }]
+            }
+        ],
+        Namespace: HYPERFLOW_METRIC_NAMESPACE
 
-  cloudwatch.putMetricData(params, function(err, data) {
-    if (err) console.log(err, err.stack); 
-    else     console.log(data);           
-  });
+    };
+
+    cloudwatch.putMetricData(params, function(err, data) {
+        if (err) console.log(err, err.stack);
+        else     console.log(data);
+    });
 }
 
 
 
 amqp.connect(AMQP_URL, function(err, conn) {
 
-  console.log("ok after connect");
+    console.log("ok after connect");
     conn.createChannel(function(err, ch) {
         console.log("createch err: %j", err);
         tryAgain = false;
 
         timeout = null;
-      setInterval(function(){
-        console.log("setInterval");
-        ch.assertQueue(QUEUE_NAME, {durable: true});
-          var mcount=0;
+        setInterval(function(){
+            console.log("setInterval");
+            ch.assertQueue(QUEUE_NAME, {durable: true});
+            var mcount=0;
             ch.checkQueue(QUEUE_NAME, function(err, ok) {
-              if(ok)
-              {
-                console.log("Session: %j", ok);
-                mcount =ok.messageCount;
-
-                if(mcount == 0 && timeout==null)
+                if(ok)
                 {
-                  if(ok.consumerCount > 1)
-                  {
-                    console.log("START TIMER");
-                    timeout=setTimeout(function(){
-                    console.log("TIMEOUT");
-                    notifyCloudWatchMetric(-1)
-                    timeout=null;
-                  },200000)
-                  }
-                }
-                if(mcount > 0 && timeout!=null)
-                {
-                  console.log("clear timer");
-                  clearTimeout(timeout);
-                  timeout =null;
-                }
+                    console.log("Session: %j", ok);
+                    mcount =ok.messageCount;
 
-                client.write('hyperflow_rabbitmq_monitor')
-                .field({
-                  QueueLength: ok.messageCount,
-                  consumerCount: ok.consumerCount,
-                  queue: ok.queue,
-                })
-                .then(() => console.info('write point success'))
+                    if(mcount == 0 && timeout==null)
+                    {
+                        if(ok.consumerCount > 1)
+                        {
+                            console.log("START TIMER");
+                            timeout=setTimeout(function(){
+                                console.log("TIMEOUT");
+                                notifyCloudWatchMetric(-1)
+                                timeout=null;
+                            },200000)
+                        }
+                    }
+                    if(mcount > 0 && timeout!=null)
+                    {
+                        console.log("clear timer");
+                        clearTimeout(timeout);
+                        timeout =null;
+                    }
+
+                    client.write('hyperflow_rabbitmq_monitor')
+                        .field({
+                            QueueLength: ok.messageCount,
+                            consumerCount: ok.consumerCount,
+                            queue: ok.queue,
+                        })
+                        .then(() => console.info('write point success'))
                 .catch(console.error);
-              
-                notifyCloudWatchMetric(mcount);
-              }
-            });
-      }, 1000);
-     });
 
-  });
-  
+                    prometheusMetrics.hyperflow_rabbitmq_monitor_queue_length = prometheusMetrics.hyperflow_rabbitmq_monitor_queue_length ||
+                        new prometheus.Gauge({
+                            name: 'hyperflow_rabbitmq_monitor_queue_length',
+                            help: 'RabbitMQ queue length',
+                            labelNames: ['queue'],
+                        });
+                    prometheusMetrics.hyperflow_rabbitmq_monitor_queue_length.set({queue: ok.queue}, ok.messageCount);
+
+                    prometheusMetrics.hyperflow_rabbitmq_monitor_consumer_count = prometheusMetrics.hyperflow_rabbitmq_monitor_consumer_count ||
+                        new prometheus.Gauge({
+                            name: 'hyperflow_rabbitmq_monitor_consumer_count',
+                            help: 'RabbitMQ consumer count',
+                            labelNames: ['queue'],
+                        });
+                    prometheusMetrics.hyperflow_rabbitmq_monitor_consumer_count.set({queue: ok.queue}, ok.consumerCount);
+
+                    notifyCloudWatchMetric(mcount);
+                }
+            });
+        }, 1000);
+    });
+
+});
+
+var app = express();
+
+app.get('/metrics', (req, res) => {
+    res.set('Content-Type', prometheus.register.contentType);
+res.send(prometheus.register.metrics());
+});
+
+app.listen(3004, () => console.log(`Example app listening on port 3004!`))

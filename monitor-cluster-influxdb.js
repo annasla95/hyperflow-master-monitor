@@ -21,11 +21,18 @@ var cloudwatch = new AWS.CloudWatch(config);
 const Influx = require('influxdb-nodejs');
 const client = new Influx(INFLUX_DB);
 
-// simple countdown 
+var express = require('express');
+var prometheus = require('prom-client');
+
+var prometheusMetrics = {};
+
+prometheus.collectDefaultMetrics();
+
+// simple countdown
 function CDL(countdown, completion) {
-  this.signal = function() { 
-      if(--countdown < 1) completion(); 
-  };
+    this.signal = function() {
+        if(--countdown < 1) completion();
+    };
 }
 
 // i --> integer
@@ -33,52 +40,69 @@ function CDL(countdown, completion) {
 // f --> float
 // b --> boolean
 const fieldSchema = {
-  ec2_count: 'i',
-  worker_count: 'i',
-  QueueLength: 'i',
-  url: 's',
+    ec2_count: 'i',
+    worker_count: 'i',
+    QueueLength: 'i',
+    url: 's',
 };
 const tagSchema = {
-  region: ['us-east1', 'us-east2'],
-  AlarmHight : ["Alarm", "Ok", "INSUFFICIENT_DATA"],
-  AlarmLow : ["Alarm", "Ok", "INSUFFICIENT_DATA"],
+    region: ['us-east1', 'us-east2'],
+    AlarmHight : ["Alarm", "Ok", "INSUFFICIENT_DATA"],
+    AlarmLow : ["Alarm", "Ok", "INSUFFICIENT_DATA"],
 };
 
 client.schema('hyperflow_monitor', fieldSchema, tagSchema, {
-  // default is false
-  stripUnknown: true,
+    // default is false
+    stripUnknown: true,
 });
 
 var params = {
-  cluster: CLUSTER_NAME
- };
+    cluster: CLUSTER_NAME
+};
 
 var paramsAlarm = {
-  AlarmNames : ["ecs_test_cluster_hyperflow_queue_lenth_low","ecs_test_cluster_hyperflow_queue_lenth_high"],
+    AlarmNames : ["ecs_test_cluster_hyperflow_queue_lenth_low","ecs_test_cluster_hyperflow_queue_lenth_high"],
 };
 
 setInterval(function(){
-  var containerCount = 0;
-  var taskCount = 0;
-  var countRespons=3;
-  var AlarmHightValue="";
-  var AlarmLowValue="";
+    var containerCount = 0;
+    var taskCount = 0;
+    var countRespons=3;
+    var AlarmHightValue="";
+    var AlarmLowValue="";
 
-  var latch = new CDL(countRespons, function() {
-    client.write('hyperflow_monitor')
-    .tag({
-      region: AWS_REGION,
-      AlarmHight : AlarmHightValue,
-      AlarmLow: AlarmLowValue,
-    })
-    .field({
-      ec2_count: containerCount,
-      worker_count: taskCount,
-      url: 'https://github.com/vicanso/influxdb-nodejs',
-    })
-    .then(() => console.info('write point success'))
+    var latch = new CDL(countRespons, function() {
+        client.write('hyperflow_monitor')
+            .tag({
+                region: AWS_REGION,
+                AlarmHight : AlarmHightValue,
+                AlarmLow: AlarmLowValue,
+            })
+            .field({
+                ec2_count: containerCount,
+                worker_count: taskCount,
+                url: 'https://github.com/vicanso/influxdb-nodejs',
+            })
+            .then(() => console.info('write point success'))
     .catch(console.error);
-  });
+
+        prometheusMetrics.hyperflow_monitor_worker_count = prometheusMetrics.hyperflow_monitor_worker_count ||
+            new prometheus.Gauge({
+                name: 'hyperflow_monitor_worker_count',
+                help: 'Alarm monitor worker count',
+                labelNames: ['region', 'alarmHigh', 'alarmLow']
+            });
+        prometheusMetrics.hyperflow_monitor_worker_count.set({region: AWS_REGION, alarmHigh : AlarmHightValue, alarmLow: AlarmLowValue}, taskCount);
+
+        prometheusMetrics.hyperflow_monitor_ec2_count = prometheusMetrics.hyperflow_monitor_ec2_count ||
+            new prometheus.Gauge({
+                name: 'hyperflow_monitor_ec2_count',
+                help: 'Alarm monitor ec2 count',
+                labelNames: ['region', 'alarmHigh', 'alarmLow']
+            });
+        prometheusMetrics.hyperflow_monitor_ec2_count.set({region: AWS_REGION, alarmHigh : AlarmHightValue, alarmLow: AlarmLowValue}, containerCount);
+
+    });
 
   ecs.listContainerInstances(params, function(err, data) {
     if (err) console.log(err, err.stack); // an error occurred
@@ -128,3 +152,11 @@ setInterval(function(){
 }, 1000);
   
 
+var app = express();
+
+app.get('/metrics', (req, res) => {
+    res.set('Content-Type', prometheus.register.contentType);
+res.send(prometheus.register.metrics());
+});
+
+app.listen(3003, () => console.log(`Example app listening on port 3003!`))
